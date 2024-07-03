@@ -7,7 +7,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(name)
 
 # Replace 'YOUR_BOT_TOKEN' with your actual bot token
-TOKEN = '7245789879:AAEgKB0FOWQ5g1laVULc-vfniUrrBWxQHTA'
+TOKEN = '7214008691:AAGieVATScjKHOiii77o6kr9d6922hJgbaU'
 
 # A simple dictionary to store links
 links = {}
