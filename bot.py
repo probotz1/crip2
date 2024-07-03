@@ -52,4 +52,4 @@ def main():
     updater.idle()
 
 if __name__ == '__main__':  # Correct the condition for main execution
-    main()
+    app.run()
