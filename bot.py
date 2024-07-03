@@ -4,7 +4,7 @@ from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)  # Use __name__ instead of name
 
 # Replace 'YOUR_BOT_TOKEN' with your actual bot token
 TOKEN = '7214008691:AAGieVATScjKHOiii77o6kr9d6922hJgbaU'
@@ -51,5 +51,5 @@ def main():
     updater.start_polling()
     updater.idle()
 
-if name == 'main':
+if __name__ == '__main__':  # Correct the condition for main execution
     main()
