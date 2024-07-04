@@ -1,55 +1,171 @@
-import logging
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Set up logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)  # Use __name__ instead of name
+import os
+import time
+import math
+import subprocess
+from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from config import BOT_TOKEN, API_ID, API_HASH, DATABASE_URL
+from motor.motor_asyncio import AsyncIOMotorClient
 
-# Replace 'YOUR_BOT_TOKEN' with your actual bot token
-TOKEN = '7214008691:AAGieVATScjKHOiii77o6kr9d6922hJgbaU'
+# Initialize your Pyrogram client
+app = Client(
+    "stream_remover_bot",
+    bot_token=BOT_TOKEN,
+    api_id=API_ID,
+    api_hash=API_HASH
+)
 
-# A simple dictionary to store links
-links = {}
+# MongoDB connection
+mongo_client = AsyncIOMotorClient(DATABASE_URL)
+db = mongo_client["stream_remover_db"]
+collection = db["videos"]
 
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('Welcome to the Crunchyroll Link Manager Bot! Use /add <URL> to add a link and /list to list all saved links.')
+# Directory for storing downloaded files
+DOWNLOADS_DIR = "downloads"
 
-def add(update: Update, context: CallbackContext) -> None:
-    url = ' '.join(context.args)
-    user_id = update.message.from_user.id
-    if not url:
-        update.message.reply_text('Please provide a Crunchyroll video URL.')
-        return
+# Ensure the downloads directory exists
+if not os.path.exists(DOWNLOADS_DIR):
+    os.makedirs(DOWNLOADS_DIR)
 
-    if user_id not in links:
-        links[user_id] = []
+PROGRESS_TEMPLATE = """
+Progress: {0}%
+Downloaded: {1} / {2}
+Speed: {3}/s
+ETA: {4}
+"""
 
-    links[user_id].append(url)
-    update.message.reply_text(f'Link added: {url}')
-    logger.info(f'Link added: {url} by user: {user_id}')
+# Dictionary to store the last update time for each message
+last_update_time = {}
 
-def list_links(update: Update, context: CallbackContext) -> None:
-    user_id = update.message.from_user.id
-    if user_id not in links or not links[user_id]:
-        update.message.reply_text('No links saved yet.')
-        return
+async def progress_callback(current, total, message, start_time):
+    now = time.time()
+    elapsed_time = now - start_time
+    if elapsed_time == 0:
+        elapsed_time = 1  # Avoid division by zero
 
-    response = 'Saved links:\n' + '\n'.join(links[user_id])
-    update.message.reply_text(response)
-    logger.info(f'Listed links for user: {user_id}')
+    speed = current / elapsed_time
+    percentage = current * 100 / total
+    eta = (total - current) / speed
 
-def main():
-    updater = Updater(TOKEN)
-    dispatcher = updater.dispatcher
+    progress_str = "[{0}{1}]".format(
+        ''.join(["⬢" for _ in range(math.floor(percentage / 10))]),
+        ''.join(["⬡" for _ in range(10 - math.floor(percentage / 10))])
+    )
+    tmp = progress_str + PROGRESS_TEMPLATE.format(
+        round(percentage, 2),
+        human_readable_size(current),
+        human_readable_size(total),
+        human_readable_size(speed),
+        time_formatter(eta)
+    )
 
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CommandHandler('add', add))
-    dispatcher.add_handler(CommandHandler('list', list_links))
+    # Throttle updates to every 10 seconds
+    message_id = message.id  # Changed from message.message_id to message.id
+    if message_id not in last_update_time or (now - last_update_time[message_id]) > 10:
+        try:
+            await message.edit(
+                text=tmp,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Owner", url='https://t.me/atxbots')]]
+                )
+            )
+            last_update_time[message_id] = now
+        except Exception as e:
+            print(f"Error updating progress: {e}")
 
-    logger.info('Bot started')
-    updater.start_polling()
-    updater.idle()
+def human_readable_size(size):
+    power = 1024
+    n = 0
+    power_labels = {0: '', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti'}
+    while size > power:
+        size /= power
+        n += 1
+    return f"{size:.2f} {power_labels[n]}B"
 
-if __name__ == '__main__':  # Correct the condition for main execution
+def time_formatter(seconds):
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    time_str = ((f"{days}d, " if days else "") +
+                (f"{hours}h, " if hours else "") +
+                (f"{minutes}m, " if minutes else "") +
+                (f"{seconds}s, " if seconds else ""))
+    return time_str.strip(', ')
+
+@app.on_message(filters.command("start"))
+async def start_command(bot, message: Message):
+    welcome_text = (
+        "Hello! I am the Stream Remover Bot.\n\n"
+        "I can help you remove audio and subtitles from video files.\n\n"
+        "To use me, simply forward a video to this chat, and I will process it for you.\n\n"
+        "Owner: [@atxbots](https://t.me/atxbots)"
+    )
+    await message.reply(welcome_text, parse_mode=ParseMode.MARKDOWN)
+
+@app.on_message(filters.video & filters.forwarded)
+async def process_forwarded_video(bot, message: Message):
+    try:
+        ms = await message.reply("Processing video...")
+
+        file_info = message.video
+        file_id = file_info.file_id
+        file_path = os.path.join(DOWNLOADS_DIR, f"{file_id}.mp4")
+
+        # Download the video file
+        await bot.download_media(message, file_path, progress=progress_callback, progress_args=(ms, time.time()))
+
+        # Verify the file is completely downloaded by checking file size
+        if not os.path.exists(file_path) or os.path.getsize(file_path) != file_info.file_size:
+            await ms.edit("Download failed or file is incomplete.")
+            return
+
+        start_time = time.time()
+        output_filename = os.path.join(DOWNLOADS_DIR, f"processed_{file_id}.mp4")
+
+        # Run ffmpeg command to remove audio and subtitles
+        ffmpeg_cmd = [
+            'ffmpeg', '-i', file_path,
+            '-c:v', 'copy', '-an', '-sn',
+            output_filename
+        ]
+        print("FFmpeg command:", " ".join(ffmpeg_cmd))  # Print the command for debugging
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("FFmpeg error output:", result.stderr)
+            await ms.edit(f"Error processing video with FFmpeg: {result.stderr}")
+            return
+
+        processing_time = time.time() - start_time
+        processed_size = os.path.getsize(output_filename)
+
+        # Send the processed video
+        await bot.send_document(
+            chat_id=message.chat.id,
+            document=output_filename,
+            caption=f"Processed video\nSize: {human_readable_size(processed_size)}\nProcessing Time: {time_formatter(processing_time)}"
+        )
+
+        # Save to MongoDB
+        video_data = {
+            "file_id": file_id,
+            "original_size": file_info.file_size,
+            "processed_size": processed_size,
+            "processing_time": processing_time,
+            "timestamp": start_time
+        }
+        await collection.insert_one(video_data)
+
+        # Clean up - remove original and processed files
+        os.remove(file_path)
+        os.remove(output_filename)
+
+    except subprocess.CalledProcessError as e:
+        await ms.edit(f"Error processing video: {e}")
+
+    except Exception as e:
+        await ms.edit(f"An error occurred: {e}")
+
+if __name__ == "__main__":
     app.run()
